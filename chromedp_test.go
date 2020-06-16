@@ -56,6 +56,10 @@ func init() {
 	// and can slightly speed up the tests on other systems.
 	allocOpts = append(allocOpts, DisableGPU)
 
+	if noHeadless := os.Getenv("CHROMEDP_NO_HEADLESS"); noHeadless != "" && noHeadless != "false" {
+		allocOpts = append(allocOpts, Flag("headless", false))
+	}
+
 	// Find the exec path once at startup.
 	execPath = os.Getenv("CHROMEDP_TEST_RUNNER")
 	if execPath == "" {
@@ -777,6 +781,64 @@ func TestAttachingToWorkers(t *testing.T) {
 				return nil
 			})); err != nil {
 				t.Fatalf("Failed to check evaluating JavaScript in a worker target: %q", err)
+			}
+		})
+	}
+}
+
+func TestRunResponse(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/index", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, `
+			<html>
+				<body>
+					<a id="index" href="/index">index</a>
+					<a id="resp_200" href="/200">200</a>
+					<a id="resp_404" href="/404">404</a>
+					<a id="resp_500" href="/500">500</a>
+				</body>
+			</html>`)
+	})
+	mux.HandleFunc("/200", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, "OK")
+	})
+	mux.HandleFunc("/500", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "500", 500)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	for _, test := range []struct {
+		name       string
+		action     Action
+		wantStatus int64
+	}{
+		{"200", Click("#resp_200", ByQuery), 200},
+		{"404", Click("#resp_404", ByQuery), 404},
+		{"500", Click("#resp_500", ByQuery), 500},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// Make this parallel once we can use ts.Cleanup for
+			// httptest.Server
+			// t.Parallel()
+
+			ctx, cancel := testAllocate(t, "")
+			defer cancel()
+
+			if err := Run(ctx, Navigate(ts.URL+"/index")); err != nil {
+				t.Fatalf("Failed to navigate to the test page: %q", err)
+			}
+
+			resp, err := RunResponse(ctx, test.action)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.Status != test.wantStatus {
+				t.Fatalf("wanted status code %d, got %d", resp.Status, test.wantStatus)
 			}
 		})
 	}
